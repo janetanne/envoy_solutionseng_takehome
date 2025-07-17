@@ -2,6 +2,7 @@ import os
 from datetime import datetime
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
+import requests
 
 # this loads the environment variables - in this case it's the API key
 load_dotenv()
@@ -11,10 +12,24 @@ app = Flask(__name__)
 ENVOY_API_KEY = os.getenv('ENVOY_API_KEY')
 ENVOY_API_URL = "https://api.envoy.com/v1"
 
-headers = {
-    "X-Api-Key": ENVOY_API_KEY,
-    "Content-Type": "application/json"
-}
+## function for sending the message back to the Envoy app
+
+def post_visitor_message(entry_id, message):
+    url = f"https://api.envoy.com/v1/entries/{entry_id}"
+
+    headers = {
+        "X-Api-Key": ENVOY_API_KEY,
+        "Content-Type": "application/json"
+    }
+    
+    data = {
+        "entry": {
+            "privateNotes": message
+        }
+    }
+
+    response = requests.post(url, headers=headers, json=data)
+    print("Visitor comment logged:", response.status_code, response.text)
 
 ## ROUTES
 
@@ -72,9 +87,48 @@ def handle_webhook():
     full_name = attributes.get("full-name", "N/A") # defaults to N/A if name isn't present
 
     if event_type == "entry_sign_in":
-        return jsonify({"message": f"Sign-in logged for {full_name}"}), 200
+        message = f"{full_name} signed in"
+        # get entry id for sign-in
+        entry_id = event.get("payload", {}).get("id")
+        if entry_id:
+            post_visitor_message(entry_id, message)
+        return jsonify({"message": message}), 200
 
     if event_type == "entry_sign_out":
+        try:
+            signed_in_at = attributes.get("signed-in-at")
+            signed_out_at = attributes.get("signed-out-at")
+
+            if not signed_in_at or not signed_out_at:
+                raise ValueError("Missing signed-in or signed-out timestamp")
+            
+            # convert timestamp into datetime object
+            sign_in_time = datetime.fromisoformat(signed_in_at.replace(" UTC", "+00:00"))
+            sign_out_time = datetime.fromisoformat(signed_out_at.replace(" UTC", "+00:00"))
+
+            # calculate duration
+            duration = int((sign_out_time - sign_in_time).total_seconds() / 60)
+
+            # check duration
+            if duration > allowed_minutes:
+                message = f"{full_name} overstayed by {duration - allowed_minutes} minutes."
+
+            else:
+                message = f"{full_name} left on time :)"
+            
+            # post to Envoy API
+            entry_id = event.get("payload", {}).get("id")
+            if entry_id:
+                post_visitor_message(entry_id, message)
+
+            return jsonify({"message": message}), 200
+        
+        # catch any errors during sign-out
+        except Exception as e:
+            print(f"Error during sign-out: {e}")
+            return jsonify({"message": f"Error: {str(e)}"}), 200
+    
+    return jsonify({"message": "No action needed"}), 200
 
 
 if __name__ == '__main__':
